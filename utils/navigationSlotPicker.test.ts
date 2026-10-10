@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import NavigationSlotPicker from '../components/settings/NavigationSlotPicker';
 import { AppID } from '../types';
+import { handleLocalBack } from './localBackHandlers';
 let root: Root, host: HTMLDivElement;
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -13,7 +14,7 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 const click = async (name: string) => act(async () => {
-  const button = [...host.querySelectorAll('button')].find(item => item.textContent?.includes(name));
+  const button = [...host.querySelectorAll('button')].find(item => item.textContent?.includes(name) || item.getAttribute('aria-label') === name);
   expect(button, name).toBeTruthy(); button!.click();
 });
 const search = async (text: string) => act(async () => {
@@ -68,4 +69,64 @@ it('offers actual saved content by stable ID and preserves root-only selection',
   expect(host.textContent).toContain('2 个内容');
   await click('星星组'); expect(onSelect.mock.lastCall?.[0]).toEqual({ appId: AppID.GroupChat, resourceId: 'g2', targetName: '星星组' });
   await click('只打开群聊列表'); expect(onSelect.mock.lastCall?.[0]).toEqual({ appId: AppID.GroupChat });
+});
+
+const press = async (target: Element, key: string, extra: KeyboardEventInit = {}) => act(async () => {
+  target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...extra }));
+});
+it('opens and changes stages without focusing search, and restores the original button on close', async () => {
+  const opener=document.createElement('button'); document.body.prepend(opener); opener.focus();
+  await act(async () => root.render(React.createElement(NavigationSlotPicker,{slot:0,characters:[{id:'c',name:'Sully'}],onSelect:vi.fn(),onClose:vi.fn()})));
+  expect(document.activeElement).toBe(host.querySelector('[role=dialog]'));
+  const input=host.querySelector('input')!;
+  await act(async () => input.focus()); await search('Message'); await click('Message');
+  expect(document.activeElement).toBe(host.querySelector('[role=dialog]')); expect(input.value).toBe('');
+  await act(async () => root.render(null)); expect(document.activeElement).toBe(opener); opener.remove();
+});
+it('does not reopen input when parent callbacks change, and Escape uses the latest close callback', async () => {
+  const first=vi.fn(), latest=vi.fn();
+  const props={slot:0,characters:[],onSelect:vi.fn(),onClose:first};
+  await act(async () => root.render(React.createElement(NavigationSlotPicker,props)));
+  const input=host.querySelector('input')!; await act(async () => input.focus()); await search('聊天');
+  await click('收起键盘');
+  expect(document.activeElement).toBe(host.querySelector('[role=dialog]')); expect(input.value).toBe('聊天');
+  await act(async () => root.render(React.createElement(NavigationSlotPicker,{...props,onClose:latest})));
+  expect(document.activeElement).not.toBe(input); expect(input.value).toBe('聊天');
+  await press(document.activeElement!,'Escape'); expect(first).not.toHaveBeenCalled(); expect(latest).toHaveBeenCalledOnce();
+});
+it('finishes search with Enter or outside clicks without dropping the query or selecting a slot', async () => {
+  const select=vi.fn();
+  await act(async () => root.render(React.createElement(NavigationSlotPicker,{slot:0,characters:[],onSelect:select,onClose:vi.fn()})));
+  const input=host.querySelector('input')!; await act(async () => input.focus()); await search('聊天');
+  await press(input,'Enter',{isComposing:true}); expect(document.activeElement).toBe(input);
+  await press(input,'Enter'); expect(document.activeElement).not.toBe(input); expect(input.value).toBe('聊天');
+  await act(async () => input.focus());
+  await act(async () => (host.querySelector('[role=status]') as HTMLElement).click());
+  expect(document.activeElement).not.toBe(input); expect(input.value).toBe('聊天'); expect(select).not.toHaveBeenCalled();
+  expect(input.getAttribute('enterkeyhint')).toBe('done');
+});
+it('backs out of focused search first, then the selection stage, without saving or reopening the keyboard', async () => {
+  const close=vi.fn(), select=vi.fn();
+  await act(async () => root.render(React.createElement(NavigationSlotPicker,{slot:0,characters:[{id:'c',name:'Sully'}],onSelect:select,onClose:close})));
+  await search('Message'); await click('Message');
+  const input=host.querySelector('input')!; await act(async () => input.focus()); await search('Sully');
+  await act(async () => {expect(handleLocalBack()).toBe(true);});
+  expect(host.querySelector('h3')!.textContent).toBe('选择角色'); expect(input.value).toBe('Sully'); expect(document.activeElement).not.toBe(input);
+  await act(async () => {handleLocalBack();});
+  expect(host.querySelector('h3')!.textContent).toBe('选择快捷入口'); expect(input.value).toBe(''); expect(close).not.toHaveBeenCalled(); expect(select).not.toHaveBeenCalled();
+  await act(async () => input.focus()); await press(input,'Escape'); expect(close).not.toHaveBeenCalled();
+  await press(document.activeElement!,'Escape'); expect(close).toHaveBeenCalledOnce();
+});
+it('keeps reverse Tab inside the dialog from its initial non-editable focus', async () => {
+  await act(async () => root.render(React.createElement(NavigationSlotPicker,{slot:0,characters:[],onSelect:vi.fn(),onClose:vi.fn()})));
+  const dialog=host.querySelector('[role=dialog]')!;
+  await press(dialog,'Tab',{shiftKey:true});
+  expect(document.activeElement?.textContent).toBe('取消');
+});
+
+it('does not restore an editable opener and reopen its keyboard on close', async () => {
+  const opener=document.createElement('input'); document.body.prepend(opener); opener.focus();
+  await act(async () => root.render(React.createElement(NavigationSlotPicker,{slot:0,characters:[],onSelect:vi.fn(),onClose:vi.fn()})));
+  expect(document.activeElement).not.toBe(opener);
+  await act(async () => root.render(null)); expect(document.activeElement).not.toBe(opener); opener.remove();
 });
